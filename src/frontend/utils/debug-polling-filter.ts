@@ -482,8 +482,8 @@ function collectStIlVisibleKeys(
       if (key) {
         keys.add(key)
 
-        // For derived-type variables (FB instances), also poll sub-variables
-        if (v.type.definition === 'derived') {
+        // For FB instances and user data types (structs), also poll sub-variables
+        if (v.type.definition === 'derived' || v.type.definition === 'user-data-type') {
           const prefix = makeKey(`${v.name}.`)
           /* istanbul ignore next -- defensive: makeKey consistency within same call */
           if (prefix) addLeavesWithPrefix(prefix)

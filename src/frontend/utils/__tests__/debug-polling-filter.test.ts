@@ -683,6 +683,33 @@ describe('buildActiveIndexSet', () => {
       expect(activeIndexes).toContain(20)
     })
 
+    it('includes struct fields when a user-data-type variable appears in ST source text', () => {
+      const structVar: PLCVariable = {
+        name: 'Motion',
+        class: 'local',
+        type: { definition: 'user-data-type', value: 'ST_Motion' },
+        location: '',
+        documentation: '',
+      }
+      const pou = makePou('ST_Program', 'program', [structVar], 'st')
+      pou.body.value = 'Motion.Inputs.xRunning := NOT Motion.Inputs.xRunning;\nMotion.Status := Motion.Status + 1;'
+      const state = makeState({
+        pous: [pou],
+        editorName: 'ST_Program',
+        editorLanguage: 'st',
+        debugVariableIndexes: new Map(),
+      })
+      const allLeaves = new Map<number, { compositeKey: string; type: string }[]>([
+        [30, [{ compositeKey: 'ST_Program:Motion.Inputs.xFault', type: 'BOOL' }]],
+        [31, [{ compositeKey: 'ST_Program:Motion.Inputs.xRunning', type: 'BOOL' }]],
+        [32, [{ compositeKey: 'ST_Program:Motion.Status', type: 'INT' }]],
+        [33, [{ compositeKey: 'ST_Program:MotionCount', type: 'INT' }]],
+      ])
+
+      const { activeIndexes } = buildActiveIndexSet(state, allLeaves, null)
+      expect(activeIndexes).toEqual([30, 31, 32])
+    })
+
     it('does not include variables not mentioned in source text', () => {
       const pou = makePou('Main', 'program', [makeVariable('UNUSED', 'local')], 'st')
       pou.body.value = 'X := 1;'
