@@ -471,6 +471,10 @@ export function toWriteProjectFiles(parsed: ParsedProjectSnapshot, projectPath: 
       remoteDeviceFiles.push({ relativePath, content })
     } else if (relativePath.startsWith('datatypes/')) {
       dataTypeFiles.push({ relativePath, content })
+    } else if (relativePath.startsWith('packages/')) {
+      // A package folder mixes kinds: `.dt` files are data types, the rest POUs.
+      if (relativePath.toLowerCase().endsWith('.dt')) dataTypeFiles.push({ relativePath, content })
+      else pouFiles.push({ relativePath, content })
     }
   }
 

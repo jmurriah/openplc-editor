@@ -5,6 +5,13 @@
 
 import { parseDataTypeFromText } from '../../../frontend/utils/PLC/data-type-declarations'
 import {
+  detectPouTypeFromContent,
+  isPackageRelativePath,
+  normalizePackagePath,
+  packageFromRelativePath,
+  validatePackagePath,
+} from '../../../frontend/utils/PLC/package-paths'
+import {
   detectLanguageFromExtension,
   extractDocumentation,
   extractVariablesSection,
@@ -22,6 +29,7 @@ import type {
   PLCDataType,
   PLCGlobalVariableList,
   PLCInstance,
+  PLCPackage,
   PLCPou,
   PLCRemoteDevice,
   PLCServer,
@@ -62,6 +70,8 @@ export interface ParsedProjectData {
   projectData: {
     dataTypes: PLCDataType[]
     globalVariableLists: PLCGlobalVariableList[]
+    /** Declared packages from `project.json`; packages holding elements are derived from the elements. */
+    packages: PLCPackage[]
     pous: (PLCPou & { variablesText?: string })[]
     configurations: {
       resource: {
@@ -291,7 +301,14 @@ function parsePouFile(
      extension matched the POU file glob; an extension-less file path can never reach here */
   if (!ext) return null
 
-  const pouType = detectPouTypeFromPath(file.relativePath)
+  // A package folder mixes every kind, so its POUs declare theirs in the header.
+  const pouType = isPackageRelativePath(file.relativePath)
+    ? detectPouTypeFromContent(file.content)
+    : detectPouTypeFromPath(file.relativePath)
+  if (!pouType) {
+    warnings.push(`"${file.relativePath}" has no PROGRAM, FUNCTION_BLOCK or FUNCTION header and was skipped.`)
+    return null
+  }
 
   // Legacy JSON format
   if (ext === 'json') {
@@ -400,6 +417,48 @@ function deduplicatePouFiles(pouFiles: RawProjectFile[]): RawProjectFile[] {
 }
 
 // ---------------------------------------------------------------------------
+// Packages
+// ---------------------------------------------------------------------------
+
+/** A package folder name becomes a path segment on save; one that is not an IEC identifier is refused. */
+function acceptPackageOf(relativePath: string, pkg: string, warnings: string[]): boolean {
+  const reason = validatePackagePath(pkg)
+  if (reason === null) return true
+  warnings.push(`"${relativePath}" is in an invalid package folder and was skipped: ${reason}`)
+  return false
+}
+
+function sanitizeDeclaredPackages(declared: PLCPackage[], warnings: string[]): PLCPackage[] {
+  const result: PLCPackage[] = []
+  for (const entry of declared) {
+    const path = normalizePackagePath(entry.path)
+    if (path === '') continue
+    const reason = validatePackagePath(path)
+    if (reason !== null) {
+      warnings.push(`Package "${entry.path}" in project.json was skipped: ${reason}`)
+      continue
+    }
+    result.push(entry.description !== undefined ? { path, description: entry.description } : { path })
+  }
+  return result
+}
+
+/** A list with an invalid package falls back to the root rather than being dropped: it has no file of its own. */
+function sanitizeListPackages(lists: PLCGlobalVariableList[], warnings: string[]): PLCGlobalVariableList[] {
+  return lists.map((list) => {
+    if (list.package === undefined) return list
+    const { package: listPackage, ...rest } = list
+    const path = normalizePackagePath(listPackage)
+    const reason = validatePackagePath(path)
+    if (reason !== null) {
+      warnings.push(`Global variable list "${list.name}" had an invalid package and was moved to the root: ${reason}`)
+      return rest
+    }
+    return path !== '' ? { ...rest, package: path } : rest
+  })
+}
+
+// ---------------------------------------------------------------------------
 // Main parser
 // ---------------------------------------------------------------------------
 
@@ -498,8 +557,11 @@ export function parseProjectFiles(
   // Parse POU files
   const pous: (PLCPou & { variablesText?: string })[] = []
   for (const file of filteredPouFiles) {
+    const pouPackage = packageFromRelativePath(file.relativePath)
+    if (!acceptPackageOf(file.relativePath, pouPackage, warnings)) continue
     const pou = parsePouFile(file, warnings, fatalErrors)
     if (pou) {
+      if (pouPackage !== '') pou.package = pouPackage
       // Ensure all POUs have a name (derive from filename if missing)
       if (!pou.name) {
         pou.name = getBaseNameFromPath(file.relativePath)
@@ -544,10 +606,14 @@ export function parseProjectFiles(
   const dataTypesFromFiles: PLCDataType[] = []
   const unparsedDataTypeFiles: RawProjectFile[] = []
   for (const file of dataTypeFiles) {
+    const dataTypePackage = packageFromRelativePath(file.relativePath)
+    if (!acceptPackageOf(file.relativePath, dataTypePackage, warnings)) continue
     const expectedName = getBaseNameFromPath(file.relativePath)
     const result = parseDataTypeFromText(file.content, expectedName)
     if (result.dataType) {
-      dataTypesFromFiles.push(result.dataType)
+      dataTypesFromFiles.push(
+        dataTypePackage !== '' ? { ...result.dataType, package: dataTypePackage } : result.dataType,
+      )
     } else {
       warnings.push(
         `Data type file "${file.relativePath}" could not be parsed and was preserved as-is: ${result.error ?? 'unknown error'}`,
@@ -593,7 +659,8 @@ export function parseProjectFiles(
       dataTypes: mergeDataTypes(dataTypesFromFiles, legacyDataTypes, dataTypeFiles),
       // Assembled field-by-field: anything not named here is dropped on load regardless of
       // how well the schema validates it.
-      globalVariableLists: (data.globalVariableLists as PLCGlobalVariableList[]) ?? [],
+      globalVariableLists: sanitizeListPackages((data.globalVariableLists as PLCGlobalVariableList[]) ?? [], warnings),
+      packages: sanitizeDeclaredPackages((data.packages as PLCPackage[] | undefined) ?? [], warnings),
       pous,
       configurations: configuration,
       servers: servers.length > 0 ? servers : ((data.servers as PLCServer[]) ?? []),

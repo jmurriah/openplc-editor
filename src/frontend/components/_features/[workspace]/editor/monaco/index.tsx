@@ -16,7 +16,7 @@ import { pouUri, splitExpression } from '../../../../../services/st-lsp'
 import { useOpenPLCStore, useOpenPLCStoreApi } from '../../../../../store'
 import { applyAcceptedHunks, computeHunks } from '../../../../../utils/ai-diff-review'
 import { memberChainBefore } from '../../../../../utils/cpp/member-chain'
-import { getExtensionFromLanguage, getFolderFromPouType } from '../../../../../utils/PLC/pou-file-extensions'
+import { pouRelativePath } from '../../../../../utils/PLC/package-paths'
 import { Modal, ModalContent, ModalTitle } from '../../../../_molecules/modal'
 import { toast } from '../../../[app]/toast/use-toast'
 import { renderDiffReview } from './ai-diff-review'
@@ -324,9 +324,7 @@ const MonacoEditor = (props: monacoEditorProps): ReturnType<typeof PrimitiveEdit
 
     if (!projectPort.watchFile || !projectPort.onFileExternalChange) return
 
-    const actualExtension = getExtensionFromLanguage(language)
-    const pouFolder = getFolderFromPouType(pou.pouType)
-    const fullPath = `${currentProjectPath}/pous/${pouFolder}/${name}${actualExtension}`
+    const fullPath = `${currentProjectPath}/${pouRelativePath({ name, pouType: pou.pouType, package: pou.package, language })}`
     watchedFilePathRef.current = fullPath
 
     void projectPort.watchFile(fullPath)
@@ -376,7 +374,7 @@ const MonacoEditor = (props: monacoEditorProps): ReturnType<typeof PrimitiveEdit
         watchedFilePathRef.current = null
       }
     }
-  }, [pou?.pouType, name, language, capabilities.hasFileWatcher, store])
+  }, [pou?.pouType, pou?.package, name, language, capabilities.hasFileWatcher, store])
 
   // onMount only fires once, so onDidChangeModel detects later model switches (tab changes
   // with keepCurrentModel) and bumps modelVersion to trigger debugVarPositions recomputation.
@@ -837,9 +835,7 @@ const MonacoEditor = (props: monacoEditorProps): ReturnType<typeof PrimitiveEdit
         if (!currentProjectPath) return
 
         try {
-          const actualExtension = getExtensionFromLanguage(language)
-          const pouFolder = getFolderFromPouType(currentPou.pouType)
-          const fullPath = `${currentProjectPath}/pous/${pouFolder}/${name}${actualExtension}`
+          const fullPath = `${currentProjectPath}/${pouRelativePath({ ...currentPou, name, language })}`
 
           const outcome = await resolveExternalBodyReload(store, projectPort, {
             pouName: name,

@@ -2,6 +2,7 @@ export { createProjectSlice } from './slice'
 export type {
   DataTypeDTO,
   InstanceDTO,
+  PackagedElementKind,
   PouDTO,
   ProjectActions,
   ProjectResponse,

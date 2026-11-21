@@ -5,6 +5,7 @@ import { StateCreator } from 'zustand'
 import type {
   ModbusIOPoint,
   OpcUaServerConfig,
+  PLCDataType,
   PLCPou,
   PLCServer,
   PLCVariable,
@@ -50,7 +51,16 @@ import { serializeDataTypeToText } from '../../../utils/PLC/data-type-serializer
 import { renameGlobalVariableListInPou } from '../../../utils/PLC/global-variable-list-references'
 import { serializeGlobalVariableListToText } from '../../../utils/PLC/global-variable-list-serializer'
 import { parseGlobalVariableListFromText } from '../../../utils/PLC/global-variable-list-text-parser'
-import { getExtensionFromLanguage, getFolderFromPouType } from '../../../utils/PLC/pou-file-extensions'
+import {
+  collectPackagePaths,
+  dataTypeRelativePath,
+  isSameOrInsidePackage,
+  normalizePackagePath,
+  packagePathsEqual,
+  pouRelativePath,
+  rebasePackagePath,
+  validatePackagePath,
+} from '../../../utils/PLC/package-paths'
 import { parseVariableDeclarations } from '../../../utils/PLC/variable-declarations'
 import { applyVariablesToText } from '../../../utils/variable-text-edits'
 import { elementNameCollision } from '../shared/name-collision'
@@ -60,6 +70,22 @@ import { createVariableValidation, updateVariableValidation, validateVariableSet
 
 const ok = (data?: unknown): ProjectResponse => ({ ok: true, data })
 const fail = (message: string, title?: string): ProjectResponse => ({ ok: false, message, title })
+
+/** A replacement data type parsed from text has no package of its own; it stays where the one it replaces was. */
+const keepPackage = (next: PLCDataType, previous: PLCDataType | undefined): PLCDataType =>
+  previous?.package ? { ...next, package: previous.package } : next
+
+/** Every package in the project, declared or holding an element, ancestors included. */
+const knownPackagePaths = (state: ProjectSliceRoot): string[] => {
+  const { packages, pous, dataTypes, globalVariableLists } = state.project.data
+  return collectPackagePaths(packages, pous, dataTypes, globalVariableLists)
+}
+
+/** Set or clear an element's package; the root is stored as an absent field. */
+const assignPackage = (element: { package?: string }, path: string): void => {
+  if (path === '') delete element.package
+  else element.package = path
+}
 
 /** IEC identifiers are case-insensitive — the rule every element-name lookup folds by. */
 const nameMatches = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase()
@@ -852,7 +878,7 @@ const reconcileDatatypeText = (name: string, getState: ProjectGetState, setState
   setState(
     produce((slice: ProjectSlice) => {
       const idx = slice.project.data.dataTypes.findIndex((d) => d.name === name)
-      if (idx !== -1) slice.project.data.dataTypes[idx] = dataType
+      if (idx !== -1) slice.project.data.dataTypes[idx] = keepPackage(dataType, slice.project.data.dataTypes[idx])
     }),
   )
   return ok()
@@ -1129,9 +1155,7 @@ const createProjectSlice: StateCreator<ProjectSliceRoot, [], [], ProjectSlice> =
         produce((slice: ProjectSlice) => {
           const pou = slice.project.data.pous.find((p) => p.name === name)
           if (pou) {
-            const folder = getFolderFromPouType(pou.pouType)
-            const ext = getExtensionFromLanguage(pou.body.language)
-            slice.pendingDeletions.push(`pous/${folder}/${name}${ext}`)
+            slice.pendingDeletions.push(pouRelativePath({ ...pou, language: pou.body.language }))
           }
           slice.project.data.pous = slice.project.data.pous.filter((p) => p.name !== name)
         }),
@@ -1187,9 +1211,7 @@ const createProjectSlice: StateCreator<ProjectSliceRoot, [], [], ProjectSlice> =
             // POU under its new path; without this, the old file lingers in
             // S3 (orphan-cleanup catches it) but the version-control badge
             // wouldn't see the deletion event and would over-count by 1.
-            const folder = getFolderFromPouType(pou.pouType)
-            const ext = getExtensionFromLanguage(pou.body.language)
-            slice.pendingDeletions.push(`pous/${folder}/${oldName}${ext}`)
+            slice.pendingDeletions.push(pouRelativePath({ ...pou, name: oldName, language: pou.body.language }))
             pou.name = newName
 
             // Graphical bodies (LD / FBD) carry a `name` field inside
@@ -1717,6 +1739,143 @@ const createProjectSlice: StateCreator<ProjectSliceRoot, [], [], ProjectSlice> =
     },
     reconcileGlobalVariableListText: (name) => reconcileGlobalVariableListText(name, getState, setState),
     regenerateGlobalVariableListText: (name) => regenerateGlobalVariableListText(name, getState),
+    createPackage: (path, description) => {
+      const normalized = normalizePackagePath(path)
+      if (normalized === '') return fail('A package needs a name.')
+      const invalid = validatePackagePath(normalized)
+      if (invalid) return fail(invalid)
+      if (knownPackagePaths(getState()).some((known) => packagePathsEqual(known, normalized))) {
+        return fail(`Package "${normalized}" already exists.`)
+      }
+      setState(
+        produce((slice: ProjectSlice) => {
+          const declared = slice.project.data.packages ?? []
+          declared.push(description !== undefined ? { path: normalized, description } : { path: normalized })
+          slice.project.data.packages = declared
+        }),
+      )
+      return ok()
+    },
+    renamePackage: (oldPath, newPath) => {
+      const from = normalizePackagePath(oldPath)
+      const to = normalizePackagePath(newPath)
+      if (from === '' || to === '') return fail('The project root cannot be renamed.')
+      const invalid = validatePackagePath(to)
+      if (invalid) return fail(invalid)
+      if (from === to) return ok()
+      const caseOnly = packagePathsEqual(from, to)
+      if (!caseOnly && isSameOrInsidePackage(to, from)) return fail('A package cannot be moved inside itself.')
+      const known = knownPackagePaths(getState())
+      if (!known.some((path) => packagePathsEqual(path, from))) return fail(`Package "${from}" does not exist.`)
+      // A case-only rename keeps its own path; any other existing target is taken.
+      if (!caseOnly && known.some((path) => packagePathsEqual(path, to))) {
+        return fail(`Package "${to}" already exists.`)
+      }
+
+      setState(
+        produce((slice: ProjectSlice) => {
+          const data = slice.project.data
+          const moves = (pkg: string | undefined): pkg is string =>
+            pkg !== undefined && pkg !== '' && isSameOrInsidePackage(pkg, from)
+          for (const pou of data.pous) {
+            if (!moves(pou.package)) continue
+            slice.pendingDeletions.push(pouRelativePath({ ...pou, language: pou.body.language }))
+            pou.package = rebasePackagePath(pou.package, from, to)
+          }
+          for (const dt of data.dataTypes) {
+            if (!moves(dt.package)) continue
+            slice.pendingDeletions.push(dataTypeRelativePath(dt))
+            dt.package = rebasePackagePath(dt.package, from, to)
+          }
+          for (const list of data.globalVariableLists ?? []) {
+            if (moves(list.package)) list.package = rebasePackagePath(list.package, from, to)
+          }
+          // Every package under the old path is declared at its new place, so empty ones move too.
+          const descriptions = new Map(
+            (data.packages ?? []).map((entry) => [normalizePackagePath(entry.path).toLowerCase(), entry.description]),
+          )
+          const moved = known
+            .filter((path) => isSameOrInsidePackage(path, from))
+            .map((path) => {
+              const description = descriptions.get(path.toLowerCase())
+              const next = rebasePackagePath(path, from, to)
+              return description !== undefined ? { path: next, description } : { path: next }
+            })
+          data.packages = [
+            ...(data.packages ?? []).filter((entry) => !isSameOrInsidePackage(entry.path, from)),
+            ...moved,
+          ]
+        }),
+      )
+      return ok()
+    },
+    deletePackage: (path) => {
+      const target = normalizePackagePath(path)
+      if (target === '') return fail('The project root cannot be deleted.')
+      const { pous, dataTypes, globalVariableLists } = getState().project.data
+      const occupant = [...pous, ...dataTypes, ...(globalVariableLists ?? [])].find(
+        (element) =>
+          element.package !== undefined && element.package !== '' && isSameOrInsidePackage(element.package, target),
+      )
+      if (occupant) {
+        return fail(`Package "${target}" still holds "${occupant.name}". Move or delete its contents first.`)
+      }
+      setState(
+        produce((slice: ProjectSlice) => {
+          slice.project.data.packages = (slice.project.data.packages ?? []).filter(
+            (entry) => !isSameOrInsidePackage(entry.path, target),
+          )
+        }),
+      )
+      return ok()
+    },
+    setElementPackage: (kind, name, path, options) => {
+      const queueOldFile = options?.hasFileOnDisk ?? true
+      const target = normalizePackagePath(path)
+      const invalid = validatePackagePath(target)
+      if (invalid) return fail(invalid)
+      const { pous, dataTypes, globalVariableLists } = getState().project.data
+      const current =
+        kind === 'pou'
+          ? pous.find((pou) => pou.name === name)
+          : kind === 'data-type'
+            ? dataTypes.find((dt) => dt.name === name)
+            : (globalVariableLists ?? []).find((list) => nameMatches(list.name, name))
+      if (!current) return fail(`"${name}" was not found.`)
+      if (normalizePackagePath(current.package) === target) return ok()
+
+      setState(
+        produce((slice: ProjectSlice) => {
+          const data = slice.project.data
+          // Keep the package being left in the tree even when this was its last element.
+          const source = normalizePackagePath(current.package)
+          const declared = data.packages ?? []
+          for (const keep of [source, target]) {
+            if (keep !== '' && !declared.some((entry) => packagePathsEqual(entry.path, keep))) {
+              declared.push({ path: keep })
+            }
+          }
+          data.packages = declared
+
+          if (kind === 'pou') {
+            const pou = data.pous.find((p) => p.name === name)
+            if (!pou) return
+            if (queueOldFile) slice.pendingDeletions.push(pouRelativePath({ ...pou, language: pou.body.language }))
+            assignPackage(pou, target)
+          } else if (kind === 'data-type') {
+            const dt = data.dataTypes.find((d) => d.name === name)
+            if (!dt) return
+            if (queueOldFile) slice.pendingDeletions.push(dataTypeRelativePath(dt))
+            assignPackage(dt, target)
+          } else {
+            // Lists live in project.json: there is no file to queue.
+            const list = (data.globalVariableLists ?? []).find((l) => nameMatches(l.name, name))
+            if (list) assignPackage(list, target)
+          }
+        }),
+      )
+      return ok()
+    },
     createDatatype: (dto) => {
       const existing = getState().project.data.dataTypes.find((d) => d.name === dto.data.name)
       if (existing) return fail('Data type already exists')
@@ -1738,7 +1897,8 @@ const createProjectSlice: StateCreator<ProjectSliceRoot, [], [], ProjectSlice> =
           // Harmless when the file was never written (a type created and
           // deleted before any save): the editor's deletion pass is
           // existence-checked, the web's relies on delete-by-omission.
-          slice.pendingDeletions.push(`datatypes/${name}.dt`)
+          const dt = slice.project.data.dataTypes.find((d) => d.name === name)
+          slice.pendingDeletions.push(dataTypeRelativePath({ name, package: dt?.package }))
           slice.project.data.dataTypes = slice.project.data.dataTypes.filter((d) => d.name !== name)
         }),
       )
@@ -1749,7 +1909,7 @@ const createProjectSlice: StateCreator<ProjectSliceRoot, [], [], ProjectSlice> =
           const idx = slice.project.data.dataTypes.findIndex((d) => d.name === name)
           if (idx === -1) return
           if (data) {
-            slice.project.data.dataTypes[idx] = data
+            slice.project.data.dataTypes[idx] = keepPackage(data, slice.project.data.dataTypes[idx])
           }
         }),
       )
@@ -1761,7 +1921,7 @@ const createProjectSlice: StateCreator<ProjectSliceRoot, [], [], ProjectSlice> =
           if (!dt) return
           // Queue the OLD path — the next save serializes the type
           // under its new name (model: updatePouName).
-          slice.pendingDeletions.push(`datatypes/${oldName}.dt`)
+          slice.pendingDeletions.push(dataTypeRelativePath({ name: oldName, package: dt.package }))
           dt.name = newName
         }),
       )
@@ -1819,7 +1979,7 @@ const createProjectSlice: StateCreator<ProjectSliceRoot, [], [], ProjectSlice> =
       setState(
         produce((slice: ProjectSlice) => {
           const idx = slice.project.data.dataTypes.findIndex((d) => d.name === name)
-          if (idx !== -1) slice.project.data.dataTypes[idx] = data
+          if (idx !== -1) slice.project.data.dataTypes[idx] = keepPackage(data, slice.project.data.dataTypes[idx])
         }),
       )
       regenerateDatatypeText(name, getState)

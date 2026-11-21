@@ -18,7 +18,7 @@ import type { HistorySlice } from '../history'
 import type { LadderFlowSlice } from '../ladder'
 import type { LibrarySlice } from '../library'
 import type { ModalSlice } from '../modal'
-import type { ProjectSlice } from '../project'
+import type { PackagedElementKind, ProjectSlice } from '../project'
 import type { SearchSlice } from '../search'
 import type { TabsSlice } from '../tabs'
 import type { VersionControlSlice } from '../version-control'
@@ -109,6 +109,15 @@ export type GlobalVariableListActions = {
   delete: (name: string) => void
   rename: (oldName: string, newName: string) => SharedResponse
   duplicate: (sourceName: string, newName: string) => SharedResponse
+}
+
+/** Packages — folders grouping POUs, data types and global variable lists. Every change is a soft, unsaved one. */
+export type PackageActions = {
+  create: (path: string, description?: string) => SharedResponse
+  rename: (oldPath: string, newPath: string) => SharedResponse
+  delete: (path: string) => SharedResponse
+  /** Move an element; `path` `''` is the project root. */
+  moveElement: (kind: PackagedElementKind, name: string, path: string) => SharedResponse
 }
 
 export type DatatypeActions = {
@@ -219,6 +228,7 @@ export type SharedSlice = {
   pouActions: PouActions
   datatypeActions: DatatypeActions
   globalVariableListActions: GlobalVariableListActions
+  packageActions: PackageActions
   serverActions: ServerActions
   remoteDeviceActions: RemoteDeviceActions
   ethercatDeviceActions: EtherCATDeviceActions

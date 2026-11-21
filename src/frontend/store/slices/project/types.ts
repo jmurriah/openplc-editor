@@ -97,6 +97,9 @@ export type ProjectResponse = {
   data?: unknown
 }
 
+/** The element kinds a package can hold. */
+export type PackagedElementKind = 'pou' | 'data-type' | 'global-variable-list'
+
 // ---------------------------------------------------------------------------
 // Project Actions
 // ---------------------------------------------------------------------------
@@ -277,6 +280,21 @@ export type ProjectActions = {
   reconcileGlobalVariableListText: (name: string) => ProjectResponse
   /** Rewrite the code view's buffer from the list. No-op when that view isn't open. */
   regenerateGlobalVariableListText: (name: string) => void
+
+  // Packages — folders grouping POUs, data types and global variable lists (`utils/PLC/package-paths.ts`).
+  /** Declare a package (and implicitly its ancestors). Fails on an invalid or taken path. */
+  createPackage: (path: string, description?: string) => ProjectResponse
+  /** Move a package, its sub-packages and every element in them; old files are queued for deletion. */
+  renamePackage: (oldPath: string, newPath: string) => ProjectResponse
+  /** Remove an empty package and its empty sub-packages. Refuses one that still holds elements. */
+  deletePackage: (path: string) => ProjectResponse
+  /** Move one element into `path` (`''` is the root); a POU's or data type's old file is queued for deletion. */
+  setElementPackage: (
+    kind: PackagedElementKind,
+    name: string,
+    path: string,
+    options?: { hasFileOnDisk?: boolean },
+  ) => ProjectResponse
 
   // Data types
   createDatatype: (dto: DataTypeDTO & { rowToInsert?: number }) => ProjectResponse

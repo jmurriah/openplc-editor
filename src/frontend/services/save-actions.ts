@@ -17,7 +17,12 @@ import { librariesUsedByProject } from '../utils/library-usage'
 import { notifyNoWritePermission } from '../utils/notify-no-write-permission'
 import { parseDataTypeFromText } from '../utils/PLC/data-type-declarations'
 import { serializeDataTypeToText } from '../utils/PLC/data-type-serializer'
-import { getExtensionFromLanguage, getFolderFromPouType } from '../utils/PLC/pou-file-extensions'
+import {
+  collectPackagePaths,
+  dataTypeRelativePath,
+  normalizePackagePath,
+  pouRelativePath,
+} from '../utils/PLC/package-paths'
 import { parseGraphicalPouFromString, parseTextualPouFromString } from '../utils/PLC/pou-text-parser'
 import { serializePouToText } from '../utils/PLC/pou-text-serializer'
 import { carryEditorMetadata } from '../utils/PLC/variable-metadata'
@@ -83,6 +88,8 @@ function buildProjectJsonContent(state: StoreState): string {
         dataTypes: [],
         // GVLs have no file of their own — project.json is their only persistence.
         globalVariableLists: project.data.globalVariableLists ?? [],
+        // Every package, so an empty one survives; elements carry their own through their file's folder.
+        ...declaredPackagesForSave(state),
         pous: [],
         configuration: project.data.configurations,
         libraries,
@@ -95,9 +102,23 @@ function buildProjectJsonContent(state: StoreState): string {
   )
 }
 
+/** `{ packages }` with every known package, or nothing when the project has none (stable diffs for old projects). */
+function declaredPackagesForSave(state: StoreState): { packages?: { path: string; description?: string }[] } {
+  const { packages, pous, dataTypes, globalVariableLists } = state.project.data
+  const descriptions = new Map(
+    (packages ?? []).map((entry) => [normalizePackagePath(entry.path).toLowerCase(), entry.description]),
+  )
+  const paths = collectPackagePaths(packages, pous, dataTypes, globalVariableLists)
+  if (paths.length === 0) return {}
+  return {
+    packages: paths.map((path) => {
+      const description = descriptions.get(path.toLowerCase())
+      return description !== undefined ? { path, description } : { path }
+    }),
+  }
+}
+
 function buildPouSpec(pou: PLCPou, state: StoreState): ProjectFileSpec {
-  const folder = getFolderFromPouType(pou.pouType)
-  const ext = getExtensionFromLanguage(pou.body.language)
   const editorModel = state.editorActions.getEditorFromEditors(pou.name)
   const sanitized = sanitizePou(
     pou,
@@ -105,7 +126,7 @@ function buildPouSpec(pou: PLCPou, state: StoreState): ProjectFileSpec {
     buildTypeContext(state.project.data.pous, state.project.data.dataTypes, state.libraries),
   )
   return {
-    path: `pous/${folder}/${pou.name}${ext}`,
+    path: pouRelativePath({ ...pou, language: pou.body.language }),
     content: serializePouToText(sanitized),
     category: 'pou',
   }
@@ -113,7 +134,7 @@ function buildPouSpec(pou: PLCPou, state: StoreState): ProjectFileSpec {
 
 function buildDataTypeSpec(dt: PLCDataType): ProjectFileSpec {
   return {
-    path: `datatypes/${dt.name}.dt`,
+    path: dataTypeRelativePath(dt),
     content: serializeDataTypeToText(dt),
     category: 'data-type',
   }
@@ -132,7 +153,7 @@ function* iterateProjectFiles(state: StoreState): Generator<ProjectFileSpec> {
   }
   // Echo back unparsed .dt files verbatim; a parsed type claiming the same path wins.
   for (const f of state.unparsedDataTypeFiles) {
-    if (project.data.dataTypes.some((dt) => `datatypes/${dt.name}.dt` === f.relativePath)) continue
+    if (project.data.dataTypes.some((dt) => dataTypeRelativePath(dt) === f.relativePath.replace(/\\/g, '/'))) continue
     yield { path: f.relativePath, content: f.content, category: 'data-type' }
   }
 
@@ -537,6 +558,15 @@ export async function executeSaveProject(
   }
 }
 
+/** Is an old file of `name` (other than `currentPath`) still queued for deletion? */
+function hasPendingOldPath(pendingDeletions: string[], name: string, currentPath: string): boolean {
+  return pendingDeletions.some(
+    (path) =>
+      getBaseNameFromRelativePath(path).toLowerCase() === name.toLowerCase() &&
+      path.toLowerCase() !== currentPath.toLowerCase(),
+  )
+}
+
 function getBaseNameFromRelativePath(relativePath: string): string {
   return (
     relativePath
@@ -660,9 +690,12 @@ export async function executeSaveFile(
       if (!spec) return fail(`POU "${fileName}" not found.`)
       const pou = project.data.pous.find((p) => p.name === fileName)
       if (!pou) return fail(`POU "${fileName}" not found.`)
-      const folder = getFolderFromPouType(pou.pouType)
-      const ext = getExtensionFromLanguage(pou.body.language)
-      const res = await projectPort.saveFile(joinPath(projectPath, 'pous', folder, `${fileName}${ext}`), spec.content)
+      // Moved or renamed: only the whole-project save removes the old file, and two files
+      // declaring one POU would collide on the next open.
+      if (hasPendingOldPath(state.pendingDeletions, fileName, spec.path)) {
+        return executeSaveProject(store, projectPort, capabilities)
+      }
+      const res = await projectPort.saveFile(joinPath(projectPath, ...spec.path.split('/')), spec.content)
       if (!res.success) return failedWrite(res)
     } else if (file.type === 'device') {
       const config = specs.find((s) => s.category === 'device-config')
@@ -724,8 +757,11 @@ export async function executeSaveFile(
         recordedSpecs = migration.written
         if (!migration.success) return failedWrite(migration)
         state.projectActions.setDataTypesNeedMigration(false)
+      } else if (hasPendingOldPath(state.pendingDeletions, fileName, spec.path)) {
+        // Moved or renamed — see the POU branch above.
+        return executeSaveProject(store, projectPort, capabilities)
       } else {
-        const res = await projectPort.saveFile(joinPath(projectPath, 'datatypes', `${fileName}.dt`), spec.content)
+        const res = await projectPort.saveFile(joinPath(projectPath, ...spec.path.split('/')), spec.content)
         if (!res.success) return failedWrite(res)
       }
     } else {
@@ -834,9 +870,7 @@ export async function reloadPouFromDisk(
 
   try {
     const language = pou.body.language
-    const ext = getExtensionFromLanguage(language)
-    const folder = getFolderFromPouType(pou.pouType)
-    const fullPath = joinPath(state.project.meta.path, 'pous', folder, `${pouName}${ext}`)
+    const fullPath = joinPath(state.project.meta.path, ...pouRelativePath({ ...pou, language }).split('/'))
 
     const result = await projectPort.readFileContent(fullPath)
     if (!result.success || !result.content) return { success: false }
@@ -954,7 +988,7 @@ export async function reloadDataTypeFromDisk(
   if (!dt) return { success: false }
 
   try {
-    const fullPath = joinPath(state.project.meta.path, 'datatypes', `${name}.dt`)
+    const fullPath = joinPath(state.project.meta.path, ...dataTypeRelativePath(dt).split('/'))
     const result = await projectPort.readFileContent(fullPath)
     if (!result.success || !result.content) return { success: false }
 

@@ -15,6 +15,8 @@ export interface ApiProjectFiles {
   }
   pous: Record<string, Record<string, string>>
   datatypes?: Record<string, string>
+  /** Package contents keyed by their path inside `packages/` (`Motion/Axis.st`). */
+  packages?: Record<string, string>
   /** Legacy top-level server slot. Read as a fallback, never written. */
   servers?: Record<string, string>
   /** Build artifacts (`<name>.stlib`, verification cache). Without this slot they are silently dropped. */
@@ -39,6 +41,7 @@ export const ApiProjectFilesSchema = z.object({
   devices: DevicesSchema.optional(),
   pous: z.record(FileMapSchema).optional(),
   datatypes: FileMapSchema.optional(),
+  packages: FileMapSchema.optional(),
   servers: FileMapSchema.optional(),
   build: FileMapSchema.optional(),
   // A field renamed on the interface without being renamed here fails on this line.
@@ -63,6 +66,9 @@ export function getInEnvelope(env: IncomingApiProjectFiles, relativePath: string
   }
   if (parts.length === 2 && parts[0] === 'datatypes') {
     return env.datatypes?.[parts[1]]
+  }
+  if (parts.length >= 3 && parts[0] === 'packages') {
+    return env.packages?.[parts.slice(1).join('/')]
   }
   // Flat `build/<filename>` only; nested build paths are intentionally not persisted.
   if (parts.length === 2 && parts[0] === 'build') {
@@ -119,6 +125,11 @@ export function setInEnvelope(env: IncomingApiProjectFiles, relativePath: string
     env.datatypes[parts[1]] = content
     return
   }
+  if (parts.length >= 3 && parts[0] === 'packages') {
+    if (!env.packages) env.packages = {}
+    env.packages[parts.slice(1).join('/')] = content
+    return
+  }
   if (parts.length === 2 && parts[0] === 'build') {
     if (!env.build) env.build = {}
     env.build[parts[1]] = content
@@ -146,6 +157,7 @@ const MODELLED_KEYS = [
   'devices',
   'pous',
   'datatypes',
+  'packages',
   'servers',
   'build',
 ] as const
@@ -188,6 +200,12 @@ export function apiFilesToRaw(projectPath: string, files: IncomingApiProjectFile
   const dataTypeFiles = []
   for (const [filename, content] of Object.entries(files.datatypes ?? {})) {
     dataTypeFiles.push({ relativePath: `datatypes/${filename}`, content })
+  }
+  // A package folder mixes kinds: `.dt` files are data types, the rest POUs.
+  for (const [subPath, content] of Object.entries(files.packages ?? {})) {
+    const relativePath = `packages/${subPath}`
+    if (subPath.toLowerCase().endsWith('.dt')) dataTypeFiles.push({ relativePath, content })
+    else pouFiles.push({ relativePath, content })
   }
   return {
     projectPath,

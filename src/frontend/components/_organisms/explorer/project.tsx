@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { type ReactNode, useEffect, useMemo, useState } from 'react'
 
 import { projectCapabilities } from '../../../../middleware/shared/ports/types'
 import { useCapabilities, useProject } from '../../../../middleware/shared/providers'
@@ -10,12 +10,15 @@ import type { TabsProps } from '../../../store/slices/tabs'
 import { CreateEditorObjectFromTab, LIBRARY_MANIFEST_TAB_NAME } from '../../../store/slices/tabs/utils'
 import { isUserManagementCapableRuntime } from '../../../utils/device'
 import { isNativeScreenAvailable } from '../../../utils/native-screens'
+import { childPackages, collectPackagePaths, packagePathsEqual } from '../../../utils/PLC/package-paths'
 import { useToast } from '../../_features/[app]/toast/use-toast'
 import { CreatePLCElement } from '../../_features/[workspace]/create-element'
 import {
+  PackageNameInput,
   ProjectTreeBranch,
   ProjectTreeExpandableLeaf,
   ProjectTreeLeaf,
+  ProjectTreePackage,
   ProjectTreeRoot,
 } from '../../_molecules/project-tree'
 
@@ -28,6 +31,9 @@ type PouLeafLang = 'il' | 'st' | 'ld' | 'sfc' | 'fbd' | 'python' | 'cpp'
 const PROJECT_NAME_MIN = 2
 const PROJECT_NAME_MAX = 100
 const DASH_FREE_PATTERN = /^[^—–―]*$/
+
+/** A new top-level package's name field: a depth-1 package row's indent (36px) plus its arrow (22px). */
+const TOP_LEVEL_PACKAGE_INPUT_INDENT = 58
 
 function validateProjectName(value: string): string | null {
   if (value.length < PROJECT_NAME_MIN || value.length > PROJECT_NAME_MAX) {
@@ -45,10 +51,11 @@ const Project = () => {
   const { toast } = useToast()
   const {
     project: {
-      data: { pous, dataTypes, globalVariableLists, configurations, servers, remoteDevices },
+      data: { pous, dataTypes, globalVariableLists, packages, configurations, servers, remoteDevices },
       meta: { name, type: projectType, path: projectPath },
     },
     projectActions: { updateMetaName },
+    packageActions: { create: createPackage },
     tabsActions: { updateTabs },
     editorActions: { setEditor, addModel, getEditorFromEditors, removeModel },
     workspaceActions: { setSelectedProjectTreeLeaf },
@@ -130,6 +137,104 @@ const Project = () => {
   const [isEditing, setIsEditing] = useState(false)
   const [isRenaming, setIsRenaming] = useState(false)
   const [inputValue, setInputValue] = useState<string>(name)
+
+  // Packages: folders of POUs, data types and lists. Root elements stay in the category branches below.
+  // Library builds read the legacy folders only, so libraries do not offer packages.
+  const supportsPackages = projectType !== 'plc-library'
+  const [isAddingPackage, setIsAddingPackage] = useState(false)
+  const packagePaths = useMemo(
+    () => collectPackagePaths(packages, pous, dataTypes, globalVariableLists),
+    [packages, pous, dataTypes, globalVariableLists],
+  )
+  const inRoot = (element: { package?: string }) => !element.package
+
+  const handleCreatePackage = (value: string) => {
+    setIsAddingPackage(false)
+    const created = createPackage(value)
+    if (!created.ok) {
+      toast({ title: 'Package not created', description: created.message ?? '', variant: 'fail' })
+    }
+  }
+
+  const pouKindLabel = { program: 'Program', 'function-block': 'Function block', function: 'Function' } as const
+  const pouKindOrder = { program: 0, 'function-block': 1, function: 2 } as const
+
+  const renderPackage = (path: string, depth: number): ReactNode => {
+    const indent = 16 * depth
+    const inThisPackage = (element: { package?: string }) =>
+      element.package !== undefined && packagePathsEqual(element.package, path)
+    return (
+      <ProjectTreePackage key={path} path={path} depth={depth}>
+        {childPackages(packagePaths, path).map((child) => renderPackage(child, depth + 1))}
+        {pous
+          .filter(inThisPackage)
+          .sort((a, b) => pouKindOrder[a.pouType] - pouKindOrder[b.pouType] || a.name.localeCompare(b.name))
+          .map((pou) => (
+            <ProjectTreeLeaf
+              key={pou.name}
+              leafLang={pou.body.language as PouLeafLang}
+              leafType={pou.pouType}
+              label={pou.name}
+              title={`${pouKindLabel[pou.pouType]} (${pou.body.language.toUpperCase()})`}
+              highlightQuery={searchQuery}
+              indent={indent}
+              elementPackage={path}
+              onClick={() =>
+                handleCreateTab({
+                  name: pou.name,
+                  path: `/data/pous/${pou.pouType}/${pou.name}`,
+                  elementType: { type: pou.pouType, language: pou.body.language as PouLeafLang },
+                })
+              }
+            />
+          ))}
+        {dataTypes
+          .filter(inThisPackage)
+          .sort((a, b) => a.name.localeCompare(b.name))
+          .map((dataType) => (
+            <ProjectTreeLeaf
+              key={dataType.name}
+              leafLang={dataType.derivation === 'array' ? 'arr' : dataType.derivation === 'enumerated' ? 'enum' : 'str'}
+              leafType='data-type'
+              label={dataType.name}
+              title='Data type'
+              highlightQuery={searchQuery}
+              indent={indent}
+              elementPackage={path}
+              onClick={() =>
+                handleCreateTab({
+                  name: dataType.name,
+                  path: `/data/data-types/${dataType.derivation}/${dataType.name}`,
+                  elementType: { type: 'data-type', derivation: dataType.derivation },
+                })
+              }
+            />
+          ))}
+        {(globalVariableLists ?? [])
+          .filter(inThisPackage)
+          .sort((a, b) => a.name.localeCompare(b.name))
+          .map((list) => (
+            <ProjectTreeLeaf
+              key={list.name}
+              leafLang='gvl'
+              leafType='global-variable-list'
+              label={list.name}
+              title='Global variable list'
+              highlightQuery={searchQuery}
+              indent={indent}
+              elementPackage={path}
+              onClick={() =>
+                handleCreateTab({
+                  name: list.name,
+                  path: `/data/global-variables/${list.name}`,
+                  elementType: { type: 'global-variable-list' },
+                })
+              }
+            />
+          ))}
+      </ProjectTreePackage>
+    )
+  }
 
   const handleBlur = async () => {
     setIsEditing(false)
@@ -237,10 +342,33 @@ const Project = () => {
             />
           )}
 
+          {/* Packages — B&R-style folders; each holds POUs, data types and lists of any kind. */}
+          {supportsPackages && (
+            <ProjectTreeBranch
+              branchTarget='packages'
+              hasContent={packagePaths.length > 0 || isAddingPackage}
+              onAdd={() => setIsAddingPackage(true)}
+              addLabel='New package'
+            >
+              {isAddingPackage && (
+                <PackageNameInput
+                  placeholder='New package'
+                  indent={TOP_LEVEL_PACKAGE_INPUT_INDENT}
+                  onCommit={handleCreatePackage}
+                  onCancel={() => setIsAddingPackage(false)}
+                />
+              )}
+              {childPackages(packagePaths, '').map((path) => renderPackage(path, 1))}
+            </ProjectTreeBranch>
+          )}
+
           {/* Project Functions tree branch */}
-          <ProjectTreeBranch branchTarget='function'>
+          <ProjectTreeBranch
+            branchTarget='function'
+            hasContent={pous.some((pou) => pou.pouType === 'function' && inRoot(pou))}
+          >
             {pous
-              ?.filter((pou) => pou.pouType === 'function')
+              ?.filter((pou) => pou.pouType === 'function' && inRoot(pou))
               .sort((a, b) => a.name.localeCompare(b.name))
               .map((pou) => (
                 <ProjectTreeLeaf
@@ -248,6 +376,7 @@ const Project = () => {
                   leafLang={pou.body.language as PouLeafLang}
                   leafType='function'
                   label={pou.name}
+                  elementPackage={supportsPackages ? '' : undefined}
                   highlightQuery={searchQuery}
                   onClick={() =>
                     handleCreateTab({
@@ -261,9 +390,12 @@ const Project = () => {
           </ProjectTreeBranch>
 
           {/* Project Function Blocks tree branch */}
-          <ProjectTreeBranch branchTarget='function-block'>
+          <ProjectTreeBranch
+            branchTarget='function-block'
+            hasContent={pous.some((pou) => pou.pouType === 'function-block' && inRoot(pou))}
+          >
             {pous
-              ?.filter((pou) => pou.pouType === 'function-block')
+              ?.filter((pou) => pou.pouType === 'function-block' && inRoot(pou))
               .sort((a, b) => a.name.localeCompare(b.name))
               .map((pou) => (
                 <ProjectTreeLeaf
@@ -271,6 +403,7 @@ const Project = () => {
                   leafLang={pou.body.language as PouLeafLang}
                   leafType='function-block'
                   label={pou.name}
+                  elementPackage={supportsPackages ? '' : undefined}
                   highlightQuery={searchQuery}
                   onClick={() =>
                     handleCreateTab({
@@ -286,9 +419,12 @@ const Project = () => {
           {/* Project Programs tree branch — hidden in library projects
               (libraries have no programs). */}
           {projectCaps.hasPrograms && (
-            <ProjectTreeBranch branchTarget='program'>
+            <ProjectTreeBranch
+              branchTarget='program'
+              hasContent={pous.some((pou) => pou.pouType === 'program' && inRoot(pou))}
+            >
               {pous
-                ?.filter((pou) => pou.pouType === 'program')
+                ?.filter((pou) => pou.pouType === 'program' && inRoot(pou))
                 .sort((a, b) => a.name.localeCompare(b.name))
                 .map((pou) => (
                   <ProjectTreeLeaf
@@ -296,6 +432,7 @@ const Project = () => {
                     leafLang={pou.body.language as PouLeafLang}
                     leafType='program'
                     label={pou.name}
+                    elementPackage={supportsPackages ? '' : undefined}
                     highlightQuery={searchQuery}
                     onClick={() =>
                       handleCreateTab({
@@ -310,9 +447,9 @@ const Project = () => {
           )}
 
           {/* Project Data Types tree branch */}
-          <ProjectTreeBranch branchTarget='data-type'>
+          <ProjectTreeBranch branchTarget='data-type' hasContent={dataTypes.some(inRoot)}>
             {dataTypes
-              ?.filter(({ derivation }) => derivation === 'array')
+              ?.filter((dt) => dt.derivation === 'array' && inRoot(dt))
               .sort((a, b) => a.name.localeCompare(b.name))
               .map(({ name }) => (
                 <ProjectTreeLeaf
@@ -320,6 +457,7 @@ const Project = () => {
                   leafLang='arr'
                   leafType='data-type'
                   label={name}
+                  elementPackage={supportsPackages ? '' : undefined}
                   highlightQuery={searchQuery}
                   onClick={() =>
                     handleCreateTab({
@@ -331,7 +469,7 @@ const Project = () => {
                 />
               ))}
             {dataTypes
-              ?.filter(({ derivation }) => derivation === 'enumerated')
+              ?.filter((dt) => dt.derivation === 'enumerated' && inRoot(dt))
               .sort((a, b) => a.name.localeCompare(b.name))
               .map(({ name }) => (
                 <ProjectTreeLeaf
@@ -339,6 +477,7 @@ const Project = () => {
                   leafLang='enum'
                   leafType='data-type'
                   label={name}
+                  elementPackage={supportsPackages ? '' : undefined}
                   highlightQuery={searchQuery}
                   /** Todo: Update the tab state */
                   onClick={() =>
@@ -351,7 +490,7 @@ const Project = () => {
                 />
               ))}
             {dataTypes
-              ?.filter(({ derivation }) => derivation === 'structure')
+              ?.filter((dt) => dt.derivation === 'structure' && inRoot(dt))
               .sort((a, b) => a.name.localeCompare(b.name))
               .map(({ name }) => (
                 <ProjectTreeLeaf
@@ -359,6 +498,7 @@ const Project = () => {
                   leafLang='str'
                   leafType='data-type'
                   label={name}
+                  elementPackage={supportsPackages ? '' : undefined}
                   highlightQuery={searchQuery}
                   /** Todo: Update the tab state */
                   onClick={() =>
@@ -373,9 +513,9 @@ const Project = () => {
           </ProjectTreeBranch>
 
           {/* Global Variable Lists — CODESYS's own grouping, one node per list. */}
-          <ProjectTreeBranch branchTarget='global-variable-list'>
+          <ProjectTreeBranch branchTarget='global-variable-list' hasContent={(globalVariableLists ?? []).some(inRoot)}>
             {globalVariableLists
-              ?.slice()
+              ?.filter(inRoot)
               .sort((a, b) => a.name.localeCompare(b.name))
               .map(({ name }) => (
                 <ProjectTreeLeaf
@@ -383,6 +523,7 @@ const Project = () => {
                   leafLang='gvl'
                   leafType='global-variable-list'
                   label={name}
+                  elementPackage={supportsPackages ? '' : undefined}
                   highlightQuery={searchQuery}
                   onClick={() =>
                     handleCreateTab({

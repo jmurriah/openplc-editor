@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-misused-promises */
 import * as Popover from '@radix-ui/react-popover'
 import { startCase } from 'lodash'
-import { Dispatch, ReactNode, SetStateAction, useState } from 'react'
+import { Dispatch, ReactNode, SetStateAction, useEffect, useMemo, useState } from 'react'
 import { Controller, SubmitHandler, useForm } from 'react-hook-form'
 
 import { resolveModbusServerProfile } from '../../../../../../middleware/shared/utils/modbus-server-profile'
@@ -17,6 +17,7 @@ import {
   isSimulatorTarget,
 } from '../../../../../utils/device'
 import { ConvertToLangShortenedFormat } from '../../../../../utils/formatters/POU'
+import { collectPackagePaths } from '../../../../../utils/PLC/package-paths'
 import { InputWithRef } from '../../../../_atoms/input'
 import { Select, SelectContent, SelectItem, SelectTrigger } from '../../../../_atoms/select'
 import { useToast } from '../../../[app]/toast/use-toast'
@@ -69,6 +70,9 @@ const RemoteDeviceProtocolSources = [
 {
   /** TODO: Need to be implemented - Sequential Functional Chart and Functional Block Diagram */
 }
+
+/** Radix Select refuses an empty item value, so the project root gets a sentinel. */
+const ROOT_PACKAGE_VALUE = '__project_root__'
 
 const getBlockedLanguageStyle = (isBlocked: boolean) =>
   isBlocked ? 'hover:bg-white dark:hover:bg-neutral-950 cursor-not-allowed pointer-events-none opacity-30' : ''
@@ -141,10 +145,89 @@ const ElementCard = (props: ElementCardProps): ReactNode => {
     globalVariableListActions: { create: createGlobalVariableList },
     serverActions: { create: createServer },
     remoteDeviceActions: { create: createRemoteDevice },
+    packageActions: { moveElement },
     deviceAvailableOptions: { availableBoards },
+    project: {
+      meta: { type: projectType },
+      data: { packages, pous, dataTypes, globalVariableLists },
+    },
+    workspace: { selectedProjectTreeLeaf },
   } = useOpenPLCStore()
   const deviceBoard = useOpenPLCStore((state) => state.deviceDefinitions.configuration.deviceBoard)
   const [isOpen, setIsOpen] = useState(false)
+
+  // Packages: POUs, data types and lists can be created straight into one. The form opens on the
+  // package selected in the explorer, or the one holding the selected element.
+  const packageChoices = useMemo(
+    () => (projectType === 'plc-library' ? [] : collectPackagePaths(packages, pous, dataTypes, globalVariableLists)),
+    [projectType, packages, pous, dataTypes, globalVariableLists],
+  )
+  const [targetPackage, setTargetPackage] = useState('')
+  useEffect(() => {
+    if (!isOpen) return
+    const { label, type } = selectedProjectTreeLeaf
+    const selected =
+      type === 'package'
+        ? label
+        : ([...pous, ...dataTypes, ...(globalVariableLists ?? [])].find((element) => element.name === label)?.package ??
+          '')
+    setTargetPackage(packageChoices.includes(selected) ? selected : '')
+    // Only on open: re-deriving while the form is up would overwrite the user's own pick.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen])
+
+  /** After a successful create: move the new element into the chosen package. */
+  const placeInTargetPackage = (kind: 'pou' | 'data-type' | 'global-variable-list', name: string) => {
+    if (targetPackage === '') return
+    const moved = moveElement(kind, name, targetPackage)
+    if (!moved.ok) {
+      toast({
+        title: 'Created in the project root',
+        description: moved.message ?? `"${name}" could not be placed in package "${targetPackage}".`,
+        variant: 'warn',
+      })
+    }
+  }
+
+  const packageField =
+    packageChoices.length === 0 ? null : (
+      <div id='element-package-form-container' className='flex w-full flex-col gap-[6px]'>
+        <label className='my-[2px] flex-1 text-start font-caption text-xs font-normal text-neutral-1000 dark:text-neutral-300'>
+          Package:
+        </label>
+        <Select
+          value={targetPackage === '' ? ROOT_PACKAGE_VALUE : targetPackage}
+          onValueChange={(value) => setTargetPackage(value === ROOT_PACKAGE_VALUE ? '' : value)}
+        >
+          <SelectTrigger
+            withIndicator
+            aria-label='element-package'
+            placeholder='Project root'
+            className='flex h-[30px] w-full items-center justify-between gap-1 rounded-md border border-neutral-100 bg-white px-2 py-1 font-caption text-cp-sm font-medium text-neutral-850 outline-none dark:border-brand-medium-dark dark:bg-neutral-950 dark:text-neutral-300'
+          />
+          <SelectContent
+            className='box h-fit max-h-64 w-[--radix-select-trigger-width] overflow-y-auto rounded-lg bg-white outline-none dark:bg-neutral-950'
+            sideOffset={5}
+            alignOffset={5}
+            position='popper'
+            align='center'
+            side='bottom'
+          >
+            {['', ...packageChoices].map((path) => (
+              <SelectItem
+                key={path || ROOT_PACKAGE_VALUE}
+                className='flex w-full cursor-pointer items-center px-2 py-[9px] outline-none hover:bg-neutral-100 focus:bg-neutral-100 dark:hover:bg-neutral-900 dark:focus:bg-neutral-900'
+                value={path === '' ? ROOT_PACKAGE_VALUE : path}
+              >
+                <span className='font-caption text-cp-sm font-medium text-neutral-850 dark:text-neutral-300'>
+                  {path === '' ? 'Project root' : path}
+                </span>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+    )
 
   const currentBoardInfo = availableBoards.get(deviceBoard)
   const isArduinoTarget = checkIsArduinoTarget(currentBoardInfo)
@@ -173,6 +256,7 @@ const ElementCard = (props: ElementCardProps): ReactNode => {
 
   const handleCreatePou: SubmitHandler<CreatePouFormProps> = (data) => {
     const pouWasCreated = create(data)
+    if (pouWasCreated.ok) placeInTargetPackage('pou', data.name)
     if (!pouWasCreated.ok) {
       pouSetError('name', {
         type: 'already-exists',
@@ -192,6 +276,7 @@ const ElementCard = (props: ElementCardProps): ReactNode => {
 
   const handleCreateGlobalVariableList: SubmitHandler<CreateGlobalVariableListFormProps> = (data) => {
     const created = createGlobalVariableList(data.name)
+    if (created.ok) placeInTargetPackage('global-variable-list', data.name)
     if (!created.ok) {
       // Carry the reason through. A list occupies two symbols in one namespace —
       // its own name and `<name>_TYPE` — so the refusal is often about a POU or a
@@ -223,6 +308,7 @@ const ElementCard = (props: ElementCardProps): ReactNode => {
     // Name and derivation only: `datatypeActions.create` builds the datatype itself
     // through `createDatatypeObject`, so any seed passed here would be discarded.
     const created = createDatatype({ name: data.name, derivation: data.derivation })
+    if (created.ok) placeInTargetPackage('data-type', data.name)
     if (!created.ok) {
       // The refusal is often about a POU or a global variable list, not another data
       // type, so the reason has to reach the user — the form used to close on failure
@@ -403,6 +489,7 @@ const ElementCard = (props: ElementCardProps): ReactNode => {
                         }}
                       />
                     </div>
+                    {packageField}
                     <div id='form-button-container' className='flex w-full justify-between'>
                       <Popover.Close asChild>
                         <button
@@ -474,6 +561,7 @@ const ElementCard = (props: ElementCardProps): ReactNode => {
                         </span>
                       )}
                     </div>
+                    {packageField}
                     <div id='form-button-container' className='flex w-full justify-between'>
                       <Popover.Close asChild>
                         <button
@@ -881,6 +969,7 @@ const ElementCard = (props: ElementCardProps): ReactNode => {
                         }}
                       />
                     </div>
+                    {packageField}
                     <div id='form-button-container' className='flex w-full justify-between'>
                       <Popover.Close asChild>
                         <button

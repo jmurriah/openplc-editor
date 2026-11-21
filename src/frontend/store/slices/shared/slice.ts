@@ -328,9 +328,54 @@ const createSharedSlice: StateCreator<SharedRootState, [], [], SharedSlice> = (s
         state.libraryActions.addLibrary(newName, sourcePou.pouType)
       }
 
+      // The copy lands beside its source. It has no file yet, so nothing is queued for deletion.
+      if (sourcePou.package) {
+        state.projectActions.setElementPackage('pou', newName, sourcePou.package, { hasFileOnDisk: false })
+      }
+
       // Persist only on save: flag the new POU dirty instead of auto-saving.
       state.sharedWorkspaceActions.handleFileAndWorkspaceSavedState(newName)
 
+      return { ok: true }
+    },
+  },
+
+  packageActions: {
+    create: (path, description) => {
+      const result = getState().projectActions.createPackage(path, description)
+      if (!result.ok) return { ok: false, message: result.message }
+      getState().workspaceActions.setEditingState('unsaved')
+      return { ok: true }
+    },
+    rename: (oldPath, newPath) => {
+      const before = getState().project.data
+      const elementsBefore = [...before.pous, ...before.dataTypes].filter((element) => element.package)
+      const result = getState().projectActions.renamePackage(oldPath, newPath)
+      if (!result.ok) return { ok: false, message: result.message }
+      // Every element that moved is rewritten under its new folder on the next save.
+      const after = getState().project.data
+      for (const element of [...after.pous, ...after.dataTypes]) {
+        const previous = elementsBefore.find((candidate) => candidate.name === element.name)
+        if (previous && previous.package !== element.package) {
+          getState().sharedWorkspaceActions.handleFileAndWorkspaceSavedState(element.name)
+        }
+      }
+      getState().workspaceActions.setEditingState('unsaved')
+      return { ok: true }
+    },
+    delete: (path) => {
+      const result = getState().projectActions.deletePackage(path)
+      if (!result.ok) return { ok: false, message: result.message }
+      getState().workspaceActions.setEditingState('unsaved')
+      return { ok: true }
+    },
+    moveElement: (kind, name, path) => {
+      // A file created this session and never saved has nothing on disk to delete.
+      const hasFileOnDisk = getState().fileActions.getFile({ name }).file?.isNew !== true
+      const result = getState().projectActions.setElementPackage(kind, name, path, { hasFileOnDisk })
+      if (!result.ok) return { ok: false, message: result.message }
+      getState().sharedWorkspaceActions.handleFileAndWorkspaceSavedState(name)
+      getState().workspaceActions.setEditingState('unsaved')
       return { ok: true }
     },
   },

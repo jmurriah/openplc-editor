@@ -52,6 +52,10 @@ import { isOpenPLCRuntimeTarget } from '../../../utils/device'
 import { onDeviceFlashRequest } from '../../../utils/device-connect-events'
 import { buildTypeContext } from '../../../utils/generate-iec-string-to-variables'
 import { getErrorMessage } from '../../../utils/get-error-message'
+import {
+  describePackageVisibilityViolation,
+  findPackageVisibilityViolations,
+} from '../../../utils/PLC/package-visibility'
 import { type BuildOption, BuildOptionsPopover } from '../../_features/[workspace]/build-options'
 import { BuildLibraryButton } from '../../_molecules/workspace-activity-bar/default/build-library'
 import { ChatButton } from '../../_molecules/workspace-activity-bar/default/chat'
@@ -347,6 +351,19 @@ export const DefaultWorkspaceActivityBar = ({ zoom }: DefaultWorkspaceActivityBa
       if (aiChangesUnreviewed(store)) {
         addLog({ level: 'error', message: AI_PENDING_CHANGES_REFUSAL })
         return false
+      }
+
+      // Package scope: code sees its own package, the enclosing ones and the root. Names are
+      // unique project-wide, so the compiler cannot catch a reference into a sibling package.
+      {
+        const violations = findPackageVisibilityViolations(store.getState().project.data)
+        if (violations.length > 0) {
+          for (const violation of violations) {
+            addLog({ level: 'error', message: describePackageVisibilityViolation(violation) })
+          }
+          addLog({ level: 'error', message: 'Build aborted: fix the package references above and try again.' })
+          return false
+        }
       }
 
       // Always save the full project before building. The compile

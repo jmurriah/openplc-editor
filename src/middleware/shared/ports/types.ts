@@ -73,9 +73,18 @@ export interface PLCGlobalVariableList {
   /** Kept ONLY while the declaration does not parse (same contract as a POU's `variablesText`). */
   text?: string
   documentation?: string
+  /** Package path (`Motion/Axis`); absent or `''` is the project root. See `utils/PLC/package-paths.ts`. */
+  package?: string
 }
 
-export type PLCDataType =
+/** A folder grouping POUs, data types and global variable lists. Packages organise; they do not namespace. */
+export interface PLCPackage {
+  /** Segments joined with `/`, each a plain IEC identifier. */
+  path: string
+  description?: string
+}
+
+export type PLCDataType = (
   | { name: string; derivation: 'structure'; variable: PLCStructureVariable[] }
   | {
       name: string
@@ -90,6 +99,10 @@ export type PLCDataType =
       initialValue?: string
       dimensions: Array<{ dimension: string }>
     }
+) & {
+  /** Package path; absent or `''` is the project root. Derived from the `.dt` file's folder on load. */
+  package?: string
+}
 
 export interface PLCBody {
   language: PLCExtendedLanguage | 'il' | 'st' | 'ld' | 'fbd' | 'sfc' | 'python' | 'cpp'
@@ -98,6 +111,8 @@ export interface PLCBody {
 
 export interface PLCPou {
   name: string
+  /** Package path; absent or `''` is the project root. Derived from the file's folder on load. */
+  package?: string
   pouType: PouType
   interface?: {
     returnType?: string
@@ -459,6 +474,8 @@ export interface PLCProjectData {
   dataTypes: PLCDataType[]
   /** Optional on the wire so projects saved before GVLs existed still parse; absent reads as `[]`. */
   globalVariableLists?: PLCGlobalVariableList[]
+  /** Declared packages, so an empty one survives a save. Packages holding elements are also derived from them. */
+  packages?: PLCPackage[]
   pous: PLCPou[]
   configurations: {
     resource: {

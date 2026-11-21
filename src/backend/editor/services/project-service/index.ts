@@ -2,6 +2,7 @@ import { iterateWriteProjectFiles } from '@root/backend/shared/project/iterate-w
 import { projectDefaultFilesMapSchema } from '@root/backend/shared/project/project-files-schema'
 import { PLCProject } from '@root/backend/shared/types/PLC/open-plc'
 import { getDefaultSchemaValues } from '@root/backend/shared/utils/default-zod-schema-values'
+import { PACKAGE_POU_EXTENSIONS, PACKAGES_ROOT } from '@root/frontend/utils/PLC/package-paths'
 import type { WriteProjectFiles } from '@root/middleware/shared/ports/project-port'
 import {
   CreateProjectFileProps,
@@ -327,6 +328,17 @@ class ProjectService {
       // throws for paths outside the pou folders).
       const dataTypeFiles = await readDirRecursive(join(projectPath, 'datatypes'), 'datatypes', ['.dt'])
 
+      // Packages mix every kind in one folder tree: POU sources join pouFiles
+      // (their kind comes from the header), `.dt` files join dataTypeFiles.
+      const packageFiles = await readDirRecursive(join(projectPath, PACKAGES_ROOT), PACKAGES_ROOT, [
+        ...PACKAGE_POU_EXTENSIONS,
+        '.dt',
+      ])
+      for (const file of packageFiles) {
+        if (file.relativePath.toLowerCase().endsWith('.dt')) dataTypeFiles.push(file)
+        else pouFiles.push(file)
+      }
+
       // Library projects own a `library.json` at the project root.
       // Read it as a plain string (parsing happens upstream in the
       // build pipeline + manifest editor — same convention POUs use:
@@ -570,6 +582,10 @@ class ProjectService {
         }
       }
 
+      // A moved or deleted element can leave its package folder empty. Declared
+      // packages live in project.json, so an empty folder carries nothing.
+      await pruneEmptyDirectories(join(dir, PACKAGES_ROOT))
+
       return { success: true, message: 'Your project was saved successfully' }
     } catch (error) {
       console.error('Error writing project files:', error)
@@ -605,6 +621,35 @@ class ProjectService {
       }
     }
   }
+}
+
+/** Removes empty directories below `root` (never `root` itself), deepest first. Best effort. */
+async function pruneEmptyDirectories(root: string): Promise<void> {
+  const prune = async (dirPath: string): Promise<boolean> => {
+    let entries
+    try {
+      entries = await promises.readdir(dirPath, { withFileTypes: true })
+    } catch {
+      return false
+    }
+    let empty = true
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        const childPath = join(dirPath, entry.name)
+        if (await prune(childPath)) {
+          try {
+            await promises.rmdir(childPath)
+            continue
+          } catch {
+            // Raced with a write or not permitted; keep it.
+          }
+        }
+      }
+      empty = false
+    }
+    return empty
+  }
+  await prune(root)
 }
 
 export { ProjectService }

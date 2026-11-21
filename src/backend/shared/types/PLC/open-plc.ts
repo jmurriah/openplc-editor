@@ -986,6 +986,14 @@ const PLCGlobalVariableListSchema = z.object({
   /** Raw declaration kept while it does not parse — see `PLCGlobalVariableList.text`. */
   text: z.string().optional(),
   documentation: z.string().optional(),
+  /** Package path; absent is the project root. */
+  package: z.string().optional(),
+})
+
+/** A declared package — see `PLCPackage` in `middleware/shared/ports/types.ts`. */
+const PLCPackageSchema = z.object({
+  path: z.string(),
+  description: z.string().optional(),
 })
 
 const PLCProjectDataSchema = z.object({
@@ -994,6 +1002,8 @@ const PLCProjectDataSchema = z.object({
   // legacy projects still carry it and keep validating.
   dataTypes: z.array(PLCDataTypeSchema).default([]),
   globalVariableLists: z.array(PLCGlobalVariableListSchema).optional(),
+  // Optional so projects written before packages existed still validate.
+  packages: z.array(PLCPackageSchema).optional(),
   pous: z.array(PLCPouSchema).default([]),
   configuration: PLCConfigurationSchema,
   servers: z.array(PLCServerSchema).optional(),
@@ -1097,6 +1107,7 @@ export {
   PLCGlobalVariableListSchema,
   PLCGlobalVariableSchema,
   PLCInstanceSchema,
+  PLCPackageSchema,
   PLCPouSchema,
   PLCProgramSchema,
   PLCProjectDataSchema,

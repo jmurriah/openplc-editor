@@ -6,8 +6,10 @@ import { CloseIcon } from '../../../assets/icons/interface/Close'
 import { ConfigIcon } from '../../../assets/icons/interface/Config'
 import { DeviceTransferIcon } from '../../../assets/icons/interface/DeviceTransfer'
 import { DuplicateIcon } from '../../../assets/icons/interface/Duplicate'
+import { FolderIcon } from '../../../assets/icons/interface/Folder'
 import { MoreOptionsIcon } from '../../../assets/icons/interface/MoreOptions'
 import { PencilIcon } from '../../../assets/icons/interface/Pencil'
+import { PlusIcon } from '../../../assets/icons/interface/Plus'
 import { SoftMotionIcon } from '../../../assets/icons/interface/SoftMotion'
 import { ArrayIcon } from '../../../assets/icons/project/Array'
 import { CppIcon } from '../../../assets/icons/project/Cpp'
@@ -36,6 +38,13 @@ import { useOpenPLCStore, useOpenPLCStoreApi } from '../../../store'
 import { elementNameCollision, type NamedElementKind } from '../../../store/slices/shared/name-collision'
 import { WorkspaceProjectTreeLeafType } from '../../../store/slices/workspace/types'
 import { cn } from '../../../utils/cn'
+import {
+  collectPackagePaths,
+  joinPackagePath,
+  normalizePackagePath,
+  packageName,
+  parentPackage,
+} from '../../../utils/PLC/package-paths'
 import { isUnsaved, unsavedLabel } from '../../../utils/unsaved-label'
 import { HighlightedText } from '../../_atoms/highlighted-text'
 import { toast } from '../../_features/[app]/toast/use-toast'
@@ -98,6 +107,12 @@ type ProjectTreeBranchProps = ComponentPropsWithoutRef<'li'> & {
     | 'device'
     | 'server'
     | 'remote-device'
+    | 'packages'
+  /** Overrides the store-derived "has children" test — for branches whose children the caller filters. */
+  hasContent?: boolean
+  /** Shows a "+" on hover; for branches whose children are created in place (packages). */
+  onAdd?: () => void
+  addLabel?: string
   children?: ReactNode
 }
 
@@ -114,8 +129,9 @@ const BranchSources = {
   device: { BranchIcon: DeviceIcon, label: 'Device' },
   server: { BranchIcon: ServerIcon, label: 'Servers' },
   'remote-device': { BranchIcon: RemoteDeviceIcon, label: 'Remote Devices' },
+  packages: { BranchIcon: FolderIcon, label: 'Packages' },
 }
-const ProjectTreeBranch = ({ branchTarget, children, ...res }: ProjectTreeBranchProps) => {
+const ProjectTreeBranch = ({ branchTarget, hasContent, onAdd, addLabel, children, ...res }: ProjectTreeBranchProps) => {
   const {
     project: {
       data: { pous, dataTypes, globalVariableLists, servers, remoteDevices },
@@ -126,12 +142,14 @@ const ProjectTreeBranch = ({ branchTarget, children, ...res }: ProjectTreeBranch
   const { BranchIcon, label } = BranchSources[branchTarget]
   const handleBranchVisibility = useCallback(() => setBranchIsOpen(!branchIsOpen), [branchIsOpen])
   const hasAssociatedPou =
-    pous.some((pou) => pou.pouType === branchTarget) ||
-    branchTarget === 'device' ||
-    (branchTarget === 'data-type' && dataTypes.length > 0) ||
-    (branchTarget === 'global-variable-list' && (globalVariableLists?.length ?? 0) > 0) ||
-    (branchTarget === 'server' && servers !== undefined && servers.length > 0) ||
-    (branchTarget === 'remote-device' && remoteDevices !== undefined && remoteDevices.length > 0)
+    hasContent ??
+    (pous.some((pou) => pou.pouType === branchTarget) ||
+      branchTarget === 'device' ||
+      (branchTarget === 'data-type' && dataTypes.length > 0) ||
+      (branchTarget === 'global-variable-list' && (globalVariableLists?.length ?? 0) > 0) ||
+      (branchTarget === 'server' && servers !== undefined && servers.length > 0) ||
+      (branchTarget === 'remote-device' && remoteDevices !== undefined && remoteDevices.length > 0))
+  const isDebuggerVisible = useOpenPLCStore((s) => s.workspace.isDebuggerVisible)
   useEffect(() => setBranchIsOpen(hasAssociatedPou), [hasAssociatedPou])
 
   const { file: associatedFile } = getFile({ name: label || '' })
@@ -140,7 +158,7 @@ const ProjectTreeBranch = ({ branchTarget, children, ...res }: ProjectTreeBranch
   return (
     <li aria-expanded={branchIsOpen} className='cursor-pointer aria-expanded:cursor-default ' {...res}>
       <div
-        className='flex w-full cursor-pointer flex-row items-center gap-1 py-1 pl-[18px] hover:bg-slate-50 dark:hover:bg-neutral-900'
+        className='group flex w-full cursor-pointer flex-row items-center gap-1 py-1 pl-[18px] hover:bg-slate-50 dark:hover:bg-neutral-900'
         onClick={hasAssociatedPou ? handleBranchVisibility : undefined}
       >
         {hasAssociatedPou ? (
@@ -165,6 +183,21 @@ const ProjectTreeBranch = ({ branchTarget, children, ...res }: ProjectTreeBranch
         >
           {handleLabel(label) || ''}
         </span>
+        {onAdd && !isDebuggerVisible && (
+          <button
+            type='button'
+            aria-label={addLabel ?? `Add to ${label}`}
+            title={addLabel ?? `Add to ${label}`}
+            className='ml-auto mr-2 flex h-5 w-5 items-center justify-center rounded-md opacity-0 hover:bg-neutral-200 group-hover:opacity-100 dark:hover:bg-neutral-850'
+            onClick={(e) => {
+              e.stopPropagation()
+              setBranchIsOpen(true)
+              onAdd()
+            }}
+          >
+            <PlusIcon className='h-3 w-3 stroke-brand dark:stroke-brand-light' />
+          </button>
+        )}
       </div>
 
       {children && branchIsOpen && (
@@ -487,6 +520,13 @@ type IProjectTreeLeafProps = ComponentPropsWithoutRef<'li'> & {
    * without touching the parent coupler or the other modules on it.
    */
   moduleId?: string
+  /** Extra left padding in px, for leaves nested in package folders. */
+  indent?: number
+  /**
+   * The package the element sits in (`''` for the root). Set only on POU, data type
+   * and global variable list leaves, and its presence adds "Move to package".
+   */
+  elementPackage?: string
 }
 
 const LeafSources = {
@@ -528,7 +568,10 @@ const ProjectTreeLeaf = ({
   busName,
   deviceId,
   moduleId,
+  indent,
+  elementPackage,
   onClick: handleLeafClick,
+  style,
   ...res
 }: IProjectTreeLeafProps) => {
   const store = useOpenPLCStoreApi()
@@ -536,8 +579,12 @@ const ProjectTreeLeaf = ({
     editor: {
       meta: { name },
     },
+    project: {
+      data: { packages, pous, dataTypes, globalVariableLists },
+    },
     workspace: { selectedProjectTreeLeaf, isDebuggerVisible },
     workspaceActions: { setSelectedProjectTreeLeaf },
+    packageActions: { moveElement },
     pouActions: { deleteRequest: deletePouRequest, rename: renamePou, duplicate: duplicatePou },
     datatypeActions: { deleteRequest: deleteDatatypeRequest, rename: renameDatatype, duplicate: duplicateDatatype },
     globalVariableListActions: {
@@ -562,6 +609,7 @@ const ProjectTreeLeaf = ({
   const [isEditing, setIsEditing] = useState(false)
   const [newLabel, setNewLabel] = useState(label || '')
   const [isPopoverOpen, setPopoverOpen] = useState(false)
+  const [isChoosingPackage, setChoosingPackage] = useState(false)
 
   const inputNameRef = useRef<HTMLInputElement>(null)
 
@@ -822,8 +870,39 @@ const ProjectTreeLeaf = ({
   }
 
   const handleLabel = useCallback((label: string | undefined) => unsavedLabel(label, associatedFile), [associatedFile])
+
+  const isMovable = elementPackage !== undefined && (isAPou || isDatatype || isGlobalVariableList)
+  const packageChoices = useMemo(
+    () => (isChoosingPackage ? ['', ...collectPackagePaths(packages, pous, dataTypes, globalVariableLists)] : []),
+    [isChoosingPackage, packages, pous, dataTypes, globalVariableLists],
+  )
+
+  const handleMoveToPackage = (path: string) => {
+    if (!label) return
+    const kind = isAPou ? 'pou' : isDatatype ? 'data-type' : 'global-variable-list'
+    const moved = moveElement(kind, label, path)
+    if (!moved.ok) {
+      toast({
+        title: 'Move failed',
+        description: moved.message ?? `"${label}" could not be moved.`,
+        variant: 'fail',
+      })
+    }
+  }
+
   const popoverOptions = useMemo(() => {
+    const moveOption = isMovable
+      ? [
+          {
+            name: 'Move to package',
+            onClick: () => setChoosingPackage(true),
+            icon: <FolderIcon size='sm' className='h-4 w-4' />,
+            keepOpen: true,
+          },
+        ]
+      : []
     return [
+      ...moveOption,
       {
         name: 'Rename',
         onClick: () => {
@@ -846,7 +925,7 @@ const ProjectTreeLeaf = ({
         icon: <CloseIcon className='h-4 w-4 stroke-brand dark:stroke-brand-light' />,
       },
     ]
-  }, [handleDeleteFile, handleDuplicateFile, setIsEditing])
+  }, [handleDeleteFile, handleDuplicateFile, setIsEditing, isMovable])
 
   useEffect(() => {
     if (isEditing && inputNameRef.current) {
@@ -861,6 +940,7 @@ const ProjectTreeLeaf = ({
         'group flex cursor-pointer flex-row items-center py-1 pl-[58px] hover:bg-slate-50 dark:hover:bg-neutral-900',
         name === label && 'bg-slate-50 dark:bg-neutral-900',
       )}
+      style={indent ? { ...style, paddingLeft: 58 + indent } : style}
       onClick={(e) => {
         handleLeafSelection()
         if (label === name) return
@@ -899,7 +979,13 @@ const ProjectTreeLeaf = ({
       leafLang === 'devConfig' ||
       leafLang === 'userManagement' ||
       leafLang === 'persistentStorage' ? null : (
-        <Popover.Root open={isPopoverOpen && !isDebuggerVisible} onOpenChange={setPopoverOpen}>
+        <Popover.Root
+          open={isPopoverOpen && !isDebuggerVisible}
+          onOpenChange={(open) => {
+            setPopoverOpen(open)
+            if (!open) setChoosingPackage(false)
+          }}
+        >
           <Popover.Trigger
             disabled={isDebuggerVisible}
             className={cn(
@@ -928,25 +1014,62 @@ const ProjectTreeLeaf = ({
               )}
               onClick={(e) => e.stopPropagation()}
             >
-              {popoverOptions.map((option, index) => (
+              {isChoosingPackage ? (
                 <div
-                  key={option.name}
-                  className={cn(
-                    'flex w-full cursor-pointer items-center gap-2 px-2 py-1 hover:bg-neutral-100 dark:hover:bg-neutral-900',
-                    {
-                      'rounded-t-lg': index === 0,
-                      'rounded-b-lg': index === popoverOptions.length - 1,
-                    },
-                  )}
-                  onClick={() => {
-                    option.onClick()
-                    setPopoverOpen(false)
-                  }}
+                  className='flex max-h-64 flex-col overflow-y-auto py-1'
+                  role='listbox'
+                  aria-label='Move to package'
                 >
-                  {option.icon}
-                  <p>{option.name}</p>
+                  <p className='px-2 pb-1 text-cp-xs text-neutral-500 dark:text-neutral-400'>Move to package</p>
+                  {packageChoices.map((path) => {
+                    const isCurrent = normalizePackagePath(elementPackage) === path
+                    return (
+                      <div
+                        key={path || '(root)'}
+                        role='option'
+                        aria-selected={isCurrent}
+                        aria-disabled={isCurrent}
+                        className={cn(
+                          'flex w-full items-center gap-2 px-2 py-1',
+                          isCurrent
+                            ? 'cursor-default opacity-50'
+                            : 'cursor-pointer hover:bg-neutral-100 dark:hover:bg-neutral-900',
+                        )}
+                        style={{ paddingLeft: 8 + 12 * (path === '' ? 0 : path.split('/').length - 1) }}
+                        onClick={() => {
+                          if (isCurrent) return
+                          handleMoveToPackage(path)
+                          setChoosingPackage(false)
+                          setPopoverOpen(false)
+                        }}
+                      >
+                        <FolderIcon size='sm' className='h-4 w-4 flex-shrink-0' />
+                        <p className='truncate'>{path === '' ? '(Project root)' : packageName(path)}</p>
+                      </div>
+                    )
+                  })}
                 </div>
-              ))}
+              ) : (
+                popoverOptions.map((option, index) => (
+                  <div
+                    key={option.name}
+                    className={cn(
+                      'flex w-full cursor-pointer items-center gap-2 px-2 py-1 hover:bg-neutral-100 dark:hover:bg-neutral-900',
+                      {
+                        'rounded-t-lg': index === 0,
+                        'rounded-b-lg': index === popoverOptions.length - 1,
+                      },
+                    )}
+                    onClick={() => {
+                      option.onClick()
+                      if (!('keepOpen' in option && option.keepOpen)) setPopoverOpen(false)
+                    }}
+                  >
+                    {option.icon}
+                    <p>{option.name}</p>
+                  </div>
+                ))
+              )}
             </Popover.Content>
           </Popover.Portal>
         </Popover.Root>
@@ -955,4 +1078,236 @@ const ProjectTreeLeaf = ({
   )
 }
 
-export { ProjectTreeBranch, ProjectTreeExpandableLeaf, ProjectTreeLeaf, ProjectTreeNestedBranch, ProjectTreeRoot }
+type PackageNameInputProps = {
+  initialValue?: string
+  placeholder?: string
+  /** Left padding in px, so the input lines up with the row it stands for. */
+  indent: number
+  onCommit: (value: string) => void
+  onCancel: () => void
+}
+
+/** A one-line name field committed on Enter or blur, cancelled on Escape or when left empty. */
+const PackageNameInput = ({ initialValue = '', placeholder, indent, onCommit, onCancel }: PackageNameInputProps) => {
+  const [value, setValue] = useState(initialValue)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const settled = useRef(false)
+
+  useEffect(() => {
+    inputRef.current?.focus()
+    inputRef.current?.select()
+  }, [])
+
+  const settle = (commit: boolean) => {
+    if (settled.current) return
+    settled.current = true
+    const trimmed = value.trim()
+    if (commit && trimmed !== '') onCommit(trimmed)
+    else onCancel()
+  }
+
+  return (
+    <li className='flex flex-row items-center py-1' style={{ paddingLeft: indent }}>
+      <FolderIcon size='sm' className='h-4 w-4 flex-shrink-0' />
+      <input
+        ref={inputRef}
+        value={value}
+        placeholder={placeholder}
+        aria-label={placeholder ?? 'Package name'}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') settle(true)
+          if (e.key === 'Escape') settle(false)
+        }}
+        onBlur={() => settle(true)}
+        className='w-full border-0 bg-transparent px-1 text-xs text-neutral-850 focus:outline-none dark:text-neutral-300'
+      />
+    </li>
+  )
+}
+
+type ProjectTreePackageProps = {
+  /** Full package path (`Motion/Axis`). */
+  path: string
+  /** 1 for a top-level package, 2 for its children, … */
+  depth: number
+  children?: ReactNode
+}
+
+/** Left padding of a package row at `depth`; its children sit one step further in. */
+const packageRowIndent = (depth: number): number => 20 + 16 * depth
+
+/** A package folder in the explorer: expand, select, add a sub-package, rename, delete. */
+const ProjectTreePackage = ({ path, depth, children }: ProjectTreePackageProps) => {
+  const {
+    workspace: { selectedProjectTreeLeaf, isDebuggerVisible },
+    workspaceActions: { setSelectedProjectTreeLeaf },
+    packageActions: { create: createPackage, rename: renamePackage, delete: deletePackage },
+  } = useOpenPLCStore()
+
+  const [isOpen, setIsOpen] = useState(true)
+  const [isRenaming, setIsRenaming] = useState(false)
+  const [isAddingChild, setIsAddingChild] = useState(false)
+  const [isPopoverOpen, setPopoverOpen] = useState(false)
+
+  const isSelected = selectedProjectTreeLeaf.type === 'package' && selectedProjectTreeLeaf.label === path
+  const hasChildren = Boolean(children && (!Array.isArray(children) || children.flat().some(Boolean)))
+
+  const report = (title: string, result: { ok: boolean; message?: string }) => {
+    if (!result.ok) toast({ title, description: result.message ?? 'The package was not changed.', variant: 'fail' })
+  }
+
+  const options = [
+    {
+      name: 'New sub-package',
+      onClick: () => {
+        setIsOpen(true)
+        setIsAddingChild(true)
+      },
+      icon: <PlusIcon className='h-4 w-4 stroke-brand dark:stroke-brand-light' />,
+    },
+    {
+      name: 'Rename',
+      onClick: () => setIsRenaming(true),
+      icon: <PencilIcon className='h-4 w-4 stroke-brand dark:stroke-brand-light' />,
+    },
+    {
+      name: 'Delete',
+      onClick: () => report('Delete failed', deletePackage(path)),
+      icon: <CloseIcon className='h-4 w-4 stroke-brand dark:stroke-brand-light' />,
+    },
+  ]
+
+  return (
+    <li className='cursor-default'>
+      {isRenaming ? (
+        <ul className='list-none p-0'>
+          <PackageNameInput
+            initialValue={packageName(path)}
+            indent={packageRowIndent(depth) + 22}
+            onCommit={(value) => {
+              setIsRenaming(false)
+              if (value === packageName(path)) return
+              const result = renamePackage(path, joinPackagePath(parentPackage(path), value))
+              report('Rename failed', result)
+              if (result.ok && isSelected) {
+                setSelectedProjectTreeLeaf({ label: joinPackagePath(parentPackage(path), value), type: 'package' })
+              }
+            }}
+            onCancel={() => setIsRenaming(false)}
+          />
+        </ul>
+      ) : (
+        <div
+          className={cn(
+            'group flex w-full cursor-pointer flex-row items-center py-1 hover:bg-slate-50 dark:hover:bg-neutral-900',
+            isSelected && 'bg-slate-50 dark:bg-neutral-900',
+          )}
+          style={{ paddingLeft: packageRowIndent(depth) }}
+          onClick={() => setSelectedProjectTreeLeaf({ label: path, type: 'package' })}
+          title={path}
+        >
+          {hasChildren || isAddingChild ? (
+            <ArrowIcon
+              direction='right'
+              className={cn(
+                'mr-[6px] h-4 w-4 flex-shrink-0 stroke-brand-light transition-all',
+                isOpen && 'rotate-270 stroke-brand',
+              )}
+              onClick={(e) => {
+                e.stopPropagation()
+                setIsOpen(!isOpen)
+              }}
+            />
+          ) : (
+            <div className='w-[22px] flex-shrink-0' />
+          )}
+          <FolderIcon size='sm' className='h-4 w-4 flex-shrink-0' />
+          <span
+            className={cn(
+              'ml-1 w-[90%] overflow-hidden text-ellipsis whitespace-nowrap font-caption text-xs font-normal text-neutral-850 dark:text-neutral-300',
+              isSelected && 'font-medium text-neutral-1000 dark:text-white',
+            )}
+            onDoubleClick={() => !isDebuggerVisible && setIsRenaming(true)}
+          >
+            {packageName(path)}
+          </span>
+
+          <Popover.Root open={isPopoverOpen && !isDebuggerVisible} onOpenChange={setPopoverOpen}>
+            <Popover.Trigger
+              disabled={isDebuggerVisible}
+              aria-label={`Package ${path} options`}
+              className={cn(
+                'mr-2 flex h-5 w-5 items-center justify-center rounded-md opacity-0 hover:bg-neutral-200 group-hover:opacity-100 dark:hover:bg-neutral-850',
+                {
+                  'bg-neutral-200 opacity-100 dark:bg-neutral-850': isPopoverOpen,
+                  'cursor-not-allowed': isDebuggerVisible,
+                },
+              )}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <MoreOptionsIcon className='h-4 w-4' />
+            </Popover.Trigger>
+            <Popover.Portal>
+              <Popover.Content
+                align='start'
+                side='right'
+                sideOffset={2}
+                className={cn(
+                  'box z-[100] flex h-fit w-fit min-w-32 flex-col rounded-lg text-xs',
+                  'focus:outline-none focus-visible:outline-none',
+                  'bg-white text-neutral-1000 dark:bg-neutral-950 dark:text-neutral-300',
+                )}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {options.map((option, index) => (
+                  <div
+                    key={option.name}
+                    className={cn(
+                      'flex w-full cursor-pointer items-center gap-2 px-2 py-1 hover:bg-neutral-100 dark:hover:bg-neutral-900',
+                      { 'rounded-t-lg': index === 0, 'rounded-b-lg': index === options.length - 1 },
+                    )}
+                    onClick={() => {
+                      option.onClick()
+                      setPopoverOpen(false)
+                    }}
+                  >
+                    {option.icon}
+                    <p>{option.name}</p>
+                  </div>
+                ))}
+              </Popover.Content>
+            </Popover.Portal>
+          </Popover.Root>
+        </div>
+      )}
+
+      {isOpen && (hasChildren || isAddingChild) && (
+        <ul className='list-none p-0'>
+          {isAddingChild && (
+            <PackageNameInput
+              placeholder='New package'
+              indent={packageRowIndent(depth + 1) + 22}
+              onCommit={(value) => {
+                setIsAddingChild(false)
+                report('Package not created', createPackage(joinPackagePath(path, value)))
+              }}
+              onCancel={() => setIsAddingChild(false)}
+            />
+          )}
+          {children}
+        </ul>
+      )}
+    </li>
+  )
+}
+
+export {
+  PackageNameInput,
+  ProjectTreeBranch,
+  ProjectTreeExpandableLeaf,
+  ProjectTreeLeaf,
+  ProjectTreeNestedBranch,
+  ProjectTreePackage,
+  ProjectTreeRoot,
+}

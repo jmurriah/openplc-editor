@@ -45,6 +45,8 @@ export type WorkspaceProjectTreeLeafType =
   | 'persistent-storage'
   | 'ethercat-device'
   | 'ethercat-module'
+  /** A package folder; the leaf's `label` holds the package path. */
+  | 'package'
   | null
 
 // ---------------------------------------------------------------------------
